@@ -1,0 +1,10 @@
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        (action.lookup("program") == "/usr/bin/envycontrol" ||
+         action.lookup("program").indexOf("systemctl") >= 0 ||
+         action.lookup("program").indexOf("shutdown") >= 0 ||
+         action.lookup("program").indexOf("reboot") >= 0) &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});
