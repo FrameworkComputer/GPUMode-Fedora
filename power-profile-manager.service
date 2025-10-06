@@ -1,0 +1,10 @@
+[Unit]
+Description=Automatic TuneD Profile Switching
+After=multi-user.target tuned.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/power-profile-manager
+
+[Install]
+WantedBy=multi-user.target
