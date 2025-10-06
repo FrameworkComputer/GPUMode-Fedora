@@ -1,0 +1,157 @@
+name: Build Fedora RPM
+
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [created, published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:42
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Get version from tag
+        id: get_version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+            RELEASE="1"
+          elif [[ "${{ github.event.release.tag_name }}" != "" ]]; then
+            VERSION=$(echo "${{ github.event.release.tag_name }}" | sed 's/^v//')
+            RELEASE="1"
+          else
+            VERSION="1.0.0"
+            RELEASE="0.dev"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE=$RELEASE" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION-$RELEASE"
+      
+      - name: Install build tools
+        run: |
+          dnf install -y rpm-build rpmdevtools
+      
+      - name: Setup RPM build tree
+        run: |
+          rpmdev-setuptree
+      
+      - name: Create spec file
+        run: |
+          cat > ~/rpmbuild/SPECS/gpumode.spec << EOF
+          Name:           gpumode
+          Version:        ${{ steps.get_version.outputs.VERSION }}
+          Release:        ${{ steps.get_version.outputs.RELEASE }}%{?dist}
+          Summary:        Manual GPU switching and automatic power profile management
+          License:        GPL-3.0-or-later
+          URL:            https://github.com/FrameworkComputer/GPUMode-Fedora
+          Source0:        %{name}-%{version}.tar.gz
+          BuildArch:      noarch
+          
+          Requires:       python3 python3-gobject gtk3 libappindicator-gtk3 libnotify tuned udev polkit
+          
+          %description
+          System tray application for manual GPU mode switching on NVIDIA Optimus
+          laptops with automatic TuneD power profile adjustment for Fedora.
+          
+          %prep
+          %autosetup
+          
+          %build
+          # Nothing to build
+          
+          %install
+          install -Dm755 GPUMode.py %{buildroot}/usr/bin/gpumode
+          install -Dm755 power-profile-manager.py %{buildroot}/usr/bin/power-profile-manager
+          install -Dm644 power-profile-manager.service %{buildroot}/usr/lib/systemd/system/power-profile-manager.service
+          install -Dm644 99-power-profile-manager.rules %{buildroot}/etc/udev/rules.d/99-power-profile-manager.rules
+          install -Dm644 50-envycontrol.rules %{buildroot}/etc/polkit-1/rules.d/50-envycontrol.rules
+          
+          %post
+          systemctl daemon-reload
+          systemctl enable power-profile-manager.service
+          systemctl start power-profile-manager.service
+          udevadm control --reload-rules
+          udevadm trigger --subsystem-match=power_supply
+          systemctl restart polkit
+          
+          for user_home in /home/*; do
+              if [ -d "\$user_home" ]; then
+                  user=\$(basename "\$user_home")
+                  autostart_dir="\$user_home/.config/autostart"
+                  sudo -u "\$user" mkdir -p "\$autostart_dir" 2>/dev/null || mkdir -p "\$autostart_dir"
+                  cat > "\$autostart_dir/gpumode.desktop" << 'DESKTOPEOF'
+          [Desktop Entry]
+          Type=Application
+          Name=GPUMode
+          Comment=Manual GPU mode switching
+          Exec=/usr/bin/gpumode
+          Icon=video-display
+          Terminal=false
+          Categories=System;
+          X-GNOME-Autostart-enabled=true
+          DESKTOPEOF
+                  chown "\$user":"\$user" "\$autostart_dir/gpumode.desktop" 2>/dev/null || true
+              fi
+          done
+          
+          %preun
+          systemctl stop power-profile-manager.service 2>/dev/null || true
+          systemctl disable power-profile-manager.service 2>/dev/null || true
+          pkill -f "python3.*gpumode" 2>/dev/null || true
+          
+          for user_home in /home/*; do
+              rm -f "\$user_home/.config/autostart/gpumode.desktop" 2>/dev/null || true
+          done
+          
+          %files
+          /usr/bin/gpumode
+          /usr/bin/power-profile-manager
+          /usr/lib/systemd/system/power-profile-manager.service
+          /etc/udev/rules.d/99-power-profile-manager.rules
+          /etc/polkit-1/rules.d/50-envycontrol.rules
+          
+          %changelog
+          * Fri Jan 03 2025 Matt Hartley <mrh@frame.work> - ${{ steps.get_version.outputs.VERSION }}-${{ steps.get_version.outputs.RELEASE }}
+          - Release ${{ steps.get_version.outputs.VERSION }}
+          EOF
+      
+      - name: Create source tarball
+        run: |
+          mkdir -p gpumode-${{ steps.get_version.outputs.VERSION }}
+          cp GPUMode.py gpumode-${{ steps.get_version.outputs.VERSION }}/
+          cp power-profile-manager.py gpumode-${{ steps.get_version.outputs.VERSION }}/
+          cp power-profile-manager.service gpumode-${{ steps.get_version.outputs.VERSION }}/
+          cp 99-power-profile-manager.rules gpumode-${{ steps.get_version.outputs.VERSION }}/
+          cp 50-envycontrol.rules gpumode-${{ steps.get_version.outputs.VERSION }}/
+          tar czf ~/rpmbuild/SOURCES/gpumode-${{ steps.get_version.outputs.VERSION }}.tar.gz gpumode-${{ steps.get_version.outputs.VERSION }}
+      
+      - name: Build RPM
+        run: |
+          rpmbuild -ba ~/rpmbuild/SPECS/gpumode.spec
+      
+      - name: Copy RPM to workspace
+        run: |
+          cp ~/rpmbuild/RPMS/noarch/*.rpm .
+      
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpumode-fedora-rpm
+          path: '*.rpm'
+      
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.rpm'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
